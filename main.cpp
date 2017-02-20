@@ -8,9 +8,21 @@
 #define USE_SHA512 0
 
 #define AES_CBC_BLOCK_SIZE 16
-#define CHUNK_SIZE 4096
 #define SHA512_LENGTH 64
+#define IV_LENGTH 16
 #define KEYBITS 128
+
+void generate_random_string(unsigned char *iv, int len)
+{
+	static const char alphanum[] =
+		"0123456789"
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		"abcdefghijklmnopqrstuvwxyz";
+
+	for (int i = 0; i < len; ++i) {
+		iv[i] = alphanum[rand() % (sizeof(alphanum) - 1)];
+	}
+}
 
 void pkcs7_pad(unsigned char *buf, unsigned int *count)
 {
@@ -80,7 +92,7 @@ void post_decrypt(unsigned char *enc_sha512, unsigned char *orig_sha512, std::if
 void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bool encrypt, unsigned char *orig_sha512, unsigned char *enc_sha512)
 {
 	// Initialization vector, this should be random
-	unsigned char iv[17] = "0123456789123456";
+	unsigned char iv[16];
 	unsigned char buf[AES_CBC_BLOCK_SIZE];
 	unsigned char outbuf[AES_CBC_BLOCK_SIZE];
 	unsigned int bytes;
@@ -103,8 +115,15 @@ void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bo
 	mbedtls_aes_init(&aes_ctx);
 	set_aes_key(&aes_ctx, key, encrypt);
 
-	// If we're decrypting, there are two 64bit long hashes at the end of the file
-	if(!encrypt) in_length -= 2*SHA512_LENGTH;
+	if(!encrypt) {
+		// There are two 64bit long hashes at the end of the file and IV at the beginning
+		in_length -= 2*SHA512_LENGTH + IV_LENGTH;
+		src->read(reinterpret_cast<char *>(iv), IV_LENGTH);
+	} else {
+		// Generate initial IV and write it into the file
+		generate_random_string(iv, IV_LENGTH);
+		dst->write(reinterpret_cast<char *>(iv), IV_LENGTH);
+	}
 
 	// While there's something to read
 	for(size_t i = 0; i < in_length; i += AES_CBC_BLOCK_SIZE) {
@@ -140,7 +159,12 @@ void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bo
 	mbedtls_sha512_free(&enc_sha_ctx);
 	mbedtls_aes_free(&aes_ctx);
 
-	if(!encrypt) {
+	if(encrypt) {
+		// Write the hashes if we're encrypting
+		dst->write(reinterpret_cast<char*>(orig_sha512), SHA512_LENGTH);
+		dst->write(reinterpret_cast<char*>(enc_sha512), SHA512_LENGTH);
+	} else {
+		// Run post-decrypt checks
 		post_decrypt(orig_sha512, enc_sha512, src);
 	}
 }
@@ -158,10 +182,6 @@ int main(int argc, char **argv)
 	dst.open(argv[3]);
 	unsigned char orig_sha512[SHA512_LENGTH], enc_sha512[SHA512_LENGTH];
 	hash_n_stuff(&src, &dst, reinterpret_cast<unsigned char *>(argv[4]), encrypt, orig_sha512, enc_sha512);
-	if(encrypt) {
-		dst.write(reinterpret_cast<char*>(orig_sha512), SHA512_LENGTH);
-		dst.write(reinterpret_cast<char*>(enc_sha512), SHA512_LENGTH);
-	}
 	src.close();
 	dst.close();
 	return 0;
