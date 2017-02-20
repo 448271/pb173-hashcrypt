@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-Wall -DDEBUG --debug
+CFLAGS=-Wall -DDEBUG --debug -I../ -I./
 HEADERS=debug.h
 OBJECTS=aes.o sha512.o aesni.o
 
