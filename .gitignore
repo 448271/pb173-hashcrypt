@@ -32,4 +32,9 @@
 *.dSYM/
 *.su
 
+# Various editor files
+.kdev4/*
+*.kdev4
+.vscode/*
+
 hashcrypt
