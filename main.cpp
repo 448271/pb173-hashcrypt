@@ -1,5 +1,6 @@
 #include <iostream>
 #include <fstream>
+#include <cstring>
 
 #include "mbedtls/sha512.h"
 #include "mbedtls/aes.h"
@@ -11,6 +12,7 @@
 #define SHA512_LENGTH 64
 #define IV_LENGTH 16
 #define KEYBITS 128
+#define HEADER_SIZE (SHA512_LENGTH + IV_LENGTH + 3)
 
 void generate_random_string(unsigned char *iv, int len)
 {
@@ -62,38 +64,19 @@ void set_aes_key(mbedtls_aes_context *aes_ctx, unsigned char *key, bool encrypt)
 	}
 }
 
-bool compare_hashes(unsigned char *h1, unsigned char *h2, int len) {
-	for(int i = 0; i < len; i++) {
+bool check_hashes(unsigned char *h1, unsigned char *h2, size_t length)
+{
+	for(size_t i = 0; i < length; i++) {
 		if(h1[i] != h2[i]) return false;
 	}
 	return true;
 }
 
-void post_decrypt(unsigned char *sha512, std::ifstream *src)
+void hash_n_stuff(std::ifstream *src, std::ofstream *dst, bool encrypt, unsigned char *key, unsigned char *sha512, unsigned char *iv, size_t length)
 {
-	unsigned char read_sha512[SHA512_LENGTH];
-	src->read(reinterpret_cast<char *>(&read_sha512), SHA512_LENGTH);
-	printf("Comparing encrypted hashes ... ");
-	if(!compare_hashes(sha512, read_sha512, SHA512_LENGTH)) {
-		printf("failed\n");
-	} else {
-		printf("OK\n");
-	}
-}
-
-
-void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bool encrypt, unsigned char *sha512)
-{
-	// Initialization vector, this should be random
-	unsigned char iv[16];
 	unsigned char buf[AES_CBC_BLOCK_SIZE];
 	unsigned char outbuf[AES_CBC_BLOCK_SIZE];
 	unsigned int bytes;
-
-	// Get how long the input is
-	src->seekg(0, std::ios_base::end);
-	size_t in_length = src->tellg();
-	src->seekg(0, std::ios_base::beg);
 
 	mbedtls_sha512_context sha_ctx;
 	mbedtls_aes_context aes_ctx;
@@ -103,43 +86,30 @@ void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bo
 
 	mbedtls_aes_init(&aes_ctx);
 	set_aes_key(&aes_ctx, key, encrypt);
-
-	if(!encrypt) {
-		// There are two 64bit long hashes at the end of the file and IV at the beginning
-		in_length -= SHA512_LENGTH + IV_LENGTH;
-		src->read(reinterpret_cast<char *>(iv), IV_LENGTH);
-	} else {
-		// Generate initial IV and write it into the file
-		generate_random_string(iv, IV_LENGTH);
-		dst->write(reinterpret_cast<char *>(iv), IV_LENGTH);
-	}
+	size_t foo = src->tellg();
 
 	// While there's something to read
-	for(size_t i = 0; i < in_length; i += AES_CBC_BLOCK_SIZE) {
+	for(size_t i = 0; i < length; i += AES_CBC_BLOCK_SIZE) {
 		// Read one block
 		src->read(reinterpret_cast<char *>(buf), AES_CBC_BLOCK_SIZE);
 		bytes = src->gcount();
 
-		// Hash the block
 		if(encrypt) {
 			// Add padding when encrypting
 			pkcs7_pad(buf, &bytes);
-		} else {
-			// Hash the read blocks when decrypting
-			mbedtls_sha512_update(&sha_ctx, buf, bytes);
 		}
 
 		// Encrypt the block and write it to the output stream
 		mbedtls_aes_crypt_cbc(&aes_ctx, encrypt ? MBEDTLS_AES_ENCRYPT : MBEDTLS_AES_DECRYPT, bytes, iv, buf, outbuf);
 
 		// Detect padding when decrypting
-		if(!encrypt && i + AES_CBC_BLOCK_SIZE >= in_length) bytes = pkcs7_detect(outbuf);
+		if(!encrypt && i + AES_CBC_BLOCK_SIZE >= length) bytes = pkcs7_detect(outbuf);
 
 		// Write the encrypted/decrypted block to disk
 		dst->write(reinterpret_cast<char *>(outbuf), bytes);
 
-		// Hash the encrypted block
-		if(encrypt) mbedtls_sha512_update(&sha_ctx, outbuf, bytes);
+		// Hash the block
+		mbedtls_sha512_update(&sha_ctx, encrypt ? outbuf : buf, AES_CBC_BLOCK_SIZE);
 	}
 
 	// Finish generating checksums
@@ -148,14 +118,76 @@ void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bo
 	// Clean things up
 	mbedtls_sha512_free(&sha_ctx);
 	mbedtls_aes_free(&aes_ctx);
+}
+
+size_t stream_length(std::fstream *stream)
+{
+	size_t pos = stream->tellg();
+	stream->seekg(0, std::ios_base::end);
+	size_t length = stream->tellg();
+	stream->seekg(pos);
+	return length;
+}
+
+void write_header(std::ofstream *out, unsigned char *sha512, unsigned char *iv)
+{
+	out->seekp(0, std::ios_base::beg);
+	out->write("AES", 3);
+	out->write(reinterpret_cast<char *>(iv), IV_LENGTH);
+	out->write(reinterpret_cast<char *>(sha512), SHA512_LENGTH);
+}
+
+void read_header(std::ifstream *in, unsigned char *sha512, unsigned char *iv, size_t *length)
+{
+	char buf[3];
+	in->read(buf, 3);
+	if(std::strncmp(buf, "AES", 3) != 0) {
+		DIE(5, "The encrpyted file misses the AES header.");
+	}
+	in->read(reinterpret_cast<char *>(iv), IV_LENGTH);
+	if(in->gcount() != IV_LENGTH) {
+		DIE(6, "The encrypted file does not contain the IV.");
+	}
+	in->read(reinterpret_cast<char *>(sha512), SHA512_LENGTH);
+	if(in->gcount() != SHA512_LENGTH) {
+		DIE(7, "The encrypted file does not contain the SHA512 hash.");
+	}
+	*length = stream_length((std::fstream *)in) - (HEADER_SIZE);
+}
+
+void perform(bool encrypt, char *src, char *dst, unsigned char *key)
+{
+	std::ifstream in;
+	std::ofstream out;
+	unsigned char sha512[SHA512_LENGTH], iv[IV_LENGTH], iv_backup[IV_LENGTH];
+	size_t length;
+	in.open(src);
+	out.open(dst);
 
 	if(encrypt) {
-		// Write the hash if we're encrypting
-		dst->write(reinterpret_cast<char*>(sha512), SHA512_LENGTH);
+		length = stream_length((std::fstream *)&in);
+		// Leave blank space for the header
+		out.seekp(HEADER_SIZE);
+		// Generate IV
+		generate_random_string(iv, IV_LENGTH);
+		memcpy(iv_backup, iv, IV_LENGTH*sizeof(unsigned char));
+		// Encrypt the file
+		hash_n_stuff(&in, &out, encrypt, key, sha512, iv, length);
+		// Write the header
+		write_header(&out, sha512, iv_backup);
 	} else {
-		// Run post-decrypt checks
-		post_decrypt(sha512, src);
+		unsigned char read_sha512[SHA512_LENGTH];
+		read_header(&in, read_sha512, iv, &length);
+		if(length % 16 != 0) {
+			DIE(3, "The encrypted payload is of the wrong size.");
+		}
+		hash_n_stuff(&in, &out, encrypt, key, sha512, iv, length);
+		if(!check_hashes(sha512, read_sha512, SHA512_LENGTH)) {
+			DIE(4, "The hashes do not match.");
+		}
 	}
+	in.close();
+	out.close();
 }
 
 int main(int argc, char **argv)
@@ -165,13 +197,6 @@ int main(int argc, char **argv)
 	}
 	bool encrypt;
 	encrypt = argv[1][0] == 'e' ? true : false;
-	std::ifstream src;
-	std::ofstream dst;
-	src.open(argv[2]);
-	dst.open(argv[3]);
-	unsigned char sha512[SHA512_LENGTH];
-	hash_n_stuff(&src, &dst, reinterpret_cast<unsigned char *>(argv[4]), encrypt, sha512);
-	src.close();
-	dst.close();
+	perform(encrypt, argv[2], argv[3], reinterpret_cast<unsigned char *>(argv[4]));
 	return 0;
 }
