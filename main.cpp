@@ -150,7 +150,7 @@ void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bo
 	mbedtls_aes_free(&aes_ctx);
 
 	if(encrypt) {
-		// Write the hashes if we're encrypting
+		// Write the hash if we're encrypting
 		dst->write(reinterpret_cast<char*>(sha512), SHA512_LENGTH);
 	} else {
 		// Run post-decrypt checks
