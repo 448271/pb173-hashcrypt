@@ -69,19 +69,12 @@ bool compare_hashes(unsigned char *h1, unsigned char *h2, int len) {
 	return true;
 }
 
-void post_decrypt(unsigned char *enc_sha512, unsigned char *orig_sha512, std::ifstream *src)
+void post_decrypt(unsigned char *sha512, std::ifstream *src)
 {
-	unsigned char read_orig_sha512[SHA512_LENGTH], read_enc_sha512[SHA512_LENGTH];
-	src->read(reinterpret_cast<char *>(&read_orig_sha512), SHA512_LENGTH);
-	src->read(reinterpret_cast<char *>(&read_enc_sha512), SHA512_LENGTH);
+	unsigned char read_sha512[SHA512_LENGTH];
+	src->read(reinterpret_cast<char *>(&read_sha512), SHA512_LENGTH);
 	printf("Comparing encrypted hashes ... ");
-	if(!compare_hashes(enc_sha512, read_enc_sha512, SHA512_LENGTH)) {
-		printf("failed\n");
-	} else {
-		printf("OK\n");
-	}
-	printf("Comparing decrypted hashes ... ");
-	if(!compare_hashes(orig_sha512, read_orig_sha512, SHA512_LENGTH)) {
+	if(!compare_hashes(sha512, read_sha512, SHA512_LENGTH)) {
 		printf("failed\n");
 	} else {
 		printf("OK\n");
@@ -89,7 +82,7 @@ void post_decrypt(unsigned char *enc_sha512, unsigned char *orig_sha512, std::if
 }
 
 
-void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bool encrypt, unsigned char *orig_sha512, unsigned char *enc_sha512)
+void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bool encrypt, unsigned char *sha512)
 {
 	// Initialization vector, this should be random
 	unsigned char iv[16];
@@ -102,22 +95,18 @@ void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bo
 	size_t in_length = src->tellg();
 	src->seekg(0, std::ios_base::beg);
 
-	mbedtls_sha512_context orig_sha_ctx;
-	mbedtls_sha512_context enc_sha_ctx;
+	mbedtls_sha512_context sha_ctx;
 	mbedtls_aes_context aes_ctx;
 
-	mbedtls_sha512_init(&orig_sha_ctx);
-	mbedtls_sha512_starts(&orig_sha_ctx, USE_SHA512);
-
-	mbedtls_sha512_init(&enc_sha_ctx);
-	mbedtls_sha512_starts(&enc_sha_ctx, USE_SHA512);
+	mbedtls_sha512_init(&sha_ctx);
+	mbedtls_sha512_starts(&sha_ctx, USE_SHA512);
 
 	mbedtls_aes_init(&aes_ctx);
 	set_aes_key(&aes_ctx, key, encrypt);
 
 	if(!encrypt) {
 		// There are two 64bit long hashes at the end of the file and IV at the beginning
-		in_length -= 2*SHA512_LENGTH + IV_LENGTH;
+		in_length -= SHA512_LENGTH + IV_LENGTH;
 		src->read(reinterpret_cast<char *>(iv), IV_LENGTH);
 	} else {
 		// Generate initial IV and write it into the file
@@ -132,10 +121,13 @@ void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bo
 		bytes = src->gcount();
 
 		// Hash the block
-		mbedtls_sha512_update(&orig_sha_ctx, buf, bytes);
-		
-		// Add padding when encrypting
-		if(encrypt) pkcs7_pad(buf, &bytes);
+		if(encrypt) {
+			// Add padding when encrypting
+			pkcs7_pad(buf, &bytes);
+		} else {
+			// Hash the read blocks when decrypting
+			mbedtls_sha512_update(&sha_ctx, buf, bytes);
+		}
 
 		// Encrypt the block and write it to the output stream
 		mbedtls_aes_crypt_cbc(&aes_ctx, encrypt ? MBEDTLS_AES_ENCRYPT : MBEDTLS_AES_DECRYPT, bytes, iv, buf, outbuf);
@@ -147,25 +139,22 @@ void hash_n_stuff(std::ifstream *src, std::ofstream *dst, unsigned char *key, bo
 		dst->write(reinterpret_cast<char *>(outbuf), bytes);
 
 		// Hash the encrypted block
-		mbedtls_sha512_update(&enc_sha_ctx, outbuf, bytes);
+		if(encrypt) mbedtls_sha512_update(&sha_ctx, outbuf, bytes);
 	}
 
 	// Finish generating checksums
-	mbedtls_sha512_finish(&orig_sha_ctx, orig_sha512);
-	mbedtls_sha512_finish(&enc_sha_ctx, enc_sha512);
+	mbedtls_sha512_finish(&sha_ctx, sha512);
 
 	// Clean things up
-	mbedtls_sha512_free(&orig_sha_ctx);
-	mbedtls_sha512_free(&enc_sha_ctx);
+	mbedtls_sha512_free(&sha_ctx);
 	mbedtls_aes_free(&aes_ctx);
 
 	if(encrypt) {
 		// Write the hashes if we're encrypting
-		dst->write(reinterpret_cast<char*>(orig_sha512), SHA512_LENGTH);
-		dst->write(reinterpret_cast<char*>(enc_sha512), SHA512_LENGTH);
+		dst->write(reinterpret_cast<char*>(sha512), SHA512_LENGTH);
 	} else {
 		// Run post-decrypt checks
-		post_decrypt(orig_sha512, enc_sha512, src);
+		post_decrypt(sha512, src);
 	}
 }
 
@@ -180,8 +169,8 @@ int main(int argc, char **argv)
 	std::ofstream dst;
 	src.open(argv[2]);
 	dst.open(argv[3]);
-	unsigned char orig_sha512[SHA512_LENGTH], enc_sha512[SHA512_LENGTH];
-	hash_n_stuff(&src, &dst, reinterpret_cast<unsigned char *>(argv[4]), encrypt, orig_sha512, enc_sha512);
+	unsigned char sha512[SHA512_LENGTH];
+	hash_n_stuff(&src, &dst, reinterpret_cast<unsigned char *>(argv[4]), encrypt, sha512);
 	src.close();
 	dst.close();
 	return 0;
