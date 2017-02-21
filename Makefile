@@ -1,13 +1,16 @@
 CC=gcc
 CFLAGS=-Wall -DDEBUG --debug -I../ -I./
-HEADERS=debug.h
-OBJECTS=aes.o sha512.o aesni.o
+MBEDTLS=aes.o sha512.o aesni.o
 
-%.o: %.c $(HEADERS)
+all: hashcrypt
+
+%.o: %.c
 	$(CC) $(CFLAGS) -c $<
 
-hashcrypt: main.cpp $(OBJECTS)
-	g++ $(CFLAGS) -o $@ main.cpp $(OBJECTS)
+mbedtls: $(MBEDTLS)
+
+hashcrypt: main.cpp mbedtls macros.h
+	g++ $(CFLAGS) -o $@ main.cpp $(MBEDTLS)
 
 run: hashcrypt
 	./hashcrypt
